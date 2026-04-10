@@ -482,7 +482,17 @@ def update_shift(
             raise HTTPException(403, "Нет доступа к чужой смене")
         if shift.status != ShiftStatus.DRAFT:
             raise HTTPException(400, "Нельзя редактировать подтверждённую или отклонённую смену")
-    for k, v in payload.model_dump(exclude_none=True).items():
+    # exclude_unset=True — обновляем только поля реально переданные клиентом:
+    # - поле не передано        → БД-значение сохраняется
+    # - поле передано как null  → значение очищается (например, notes)
+    # - поле передано со значением → обновляется
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Сотрудник не может менять назначение смены на другого человека
+    if "employee_id" in updates and current_user.role == EmployeeRole.EMPLOYEE:
+        raise HTTPException(403, "Сотрудник не может переназначать смены")
+
+    for k, v in updates.items():
         setattr(shift, k, v)
     db.commit()
     db.refresh(shift)

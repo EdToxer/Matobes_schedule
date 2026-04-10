@@ -1683,33 +1683,76 @@ function populateShiftEmployee(selectedId) {
 }
 async function saveShift() {
   const id = document.getElementById('shiftId').value;
-  const body = {
-    employee_id: parseInt(document.getElementById('shiftEmployee').value),
-    date: document.getElementById('shiftDate').value,
-    start_time: document.getElementById('shiftStart').value,
-    end_time: document.getElementById('shiftEnd').value,
-    shift_type: document.getElementById('shiftType').value,
-    notes: document.getElementById('shiftNotes').value || null,
-  };
+
+  // Читаем все поля формы
+  const employeeId = parseInt(document.getElementById('shiftEmployee').value);
+  const dateVal    = document.getElementById('shiftDate').value;
+  const startVal   = document.getElementById('shiftStart').value;
+  const endVal     = document.getElementById('shiftEnd').value;
+  const typeVal    = document.getElementById('shiftType').value;
+  const notesVal   = document.getElementById('shiftNotes').value.trim();
+
+  // Базовая валидация на клиенте
+  if (!dateVal)  { toast('Укажите дату', 'error'); return; }
+  if (!startVal) { toast('Укажите начало смены', 'error'); return; }
+  if (!endVal)   { toast('Укажите конец смены', 'error'); return; }
+  if (startVal >= endVal) { toast('Конец смены должен быть позже начала', 'error'); return; }
+
   try {
     if (id) {
-      await api('PUT', `/shifts/${id}`, { ...body });
-      toast('Смена обновлена');
+      // PUT — передаём ВСЕ поля явно; exclude_unset на бэкенде
+      // увидит их все и применит, включая очистку notes
+      const body = {
+        employee_id: employeeId,
+        date:        dateVal,
+        start_time:  startVal,
+        end_time:    endVal,
+        shift_type:  typeVal,
+        notes:       notesVal || null,  // null очищает примечание в БД
+      };
+      await api('PUT', `/shifts/${id}`, body);
+      toast('✅ Смена обновлена');
     } else {
+      const body = {
+        employee_id: employeeId,
+        date:        dateVal,
+        start_time:  startVal,
+        end_time:    endVal,
+        shift_type:  typeVal,
+        notes:       notesVal || null,
+      };
       await api('POST', '/shifts', body);
-      toast('Смена добавлена');
+      toast('✅ Смена добавлена');
     }
     closeModal('shiftModal');
-    renderCalendar();
-    loadDashboard();
+    await _refreshAllShiftViews();
   } catch(e) { toast(e.message, 'error'); }
 }
+/** Обновляет все представления смен одновременно (параллельно).
+ *  Вызывается после любого изменения (сохранение / удаление / подтверждение).
+ *  async + Promise.allSettled — если один запрос упадёт, остальные продолжатся. */
+async function _refreshAllShiftViews() {
+  const tasks = [
+    renderCalendar(),    // личный календарь
+    loadDashboard(),     // дашборд — счётчики и статистика
+    loadTeamCalendar(),  // график команды
+  ];
+  // Обновляем страницу подтверждений только если она активна
+  const confirmPage = document.getElementById('page-confirm');
+  if (confirmPage && confirmPage.classList.contains('active')) {
+    tasks.push(loadConfirmShifts());
+  }
+  // allSettled — не падаем если один запрос вернул ошибку
+  await Promise.allSettled(tasks);
+}
+
 async function deleteShift(id) {
   if (!confirm('Удалить смену?')) return;
-  await api('DELETE', `/shifts/${id}`);
-  toast('Смена удалена');
-  renderCalendar();
-  loadDashboard();
+  try {
+    await api('DELETE', `/shifts/${id}`);
+  } catch(e) { toast(e.message, 'error'); return; }
+  toast('🗑 Смена удалена');
+  await _refreshAllShiftViews();
 }
 
 /* ─── Team calendar ───────────────────────────────────────────────────────── */
@@ -1852,7 +1895,7 @@ function loadExportTeams() {
     `<option value="">Все подразделения</option>` +
     teams.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
 }
-function doExport() {
+async function doExport() {
   const orgId  = document.getElementById('exportOrgSelect').value;
   const teamId = document.getElementById('exportTeamSelect').value;
   const df = document.getElementById('exportDateFrom').value;
@@ -1862,8 +1905,30 @@ function doExport() {
   let url = `${API}/shifts/export/excel?date_from=${df}&date_to=${dt}`;
   if (teamId) url += `&team_id=${teamId}`;
   else if (orgId) url += `&organization_id=${orgId}`;
-  window.open(url, '_blank');
-  toast('Файл скачивается…');
+
+  // window.open() не передаёт Authorization заголовок — используем fetch
+  try {
+    toast('Формируем файл…');
+    const response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      let msg = typeof err.detail === 'string' ? err.detail
+              : Array.isArray(err.detail) ? err.detail.map(e => e.msg).join('; ')
+              : `HTTP ${response.status}`;
+      throw new Error(msg);
+    }
+    const blob = await response.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `schedule_${df}_${dt}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    toast('✅ Файл скачан');
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 /* ─── Employees ───────────────────────────────────────────────────────────── */
